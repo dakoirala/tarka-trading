@@ -4,9 +4,10 @@ Three cooperating tasks share a ``MarketState``:
 
 * status   - polls market-open (and refreshes the security universe once per trade date)
 * live     - polls lives-market (all securities in one call) -> L1 trades
-* depth    - sweeps market depth for every security in the universe -> L2 + L1 BBO
+* depth    - sweeps market depth for the watchlist -> L2 + L1 BBO
 
-Outside the NEPSE session window everything sleeps until the next window.
+After a session it was open for, the status task pulls that day's floorsheet (every trade
+with buyer/seller broker). Outside the NEPSE session window everything sleeps.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from datetime import date
 from pathlib import Path
 
 from .client import Fetch, NepseClient
+from .floorsheet import capture_market_floorsheet
 from .schedule import in_window, next_window_start, now_npt, trade_date
 from .storage import RawStore, fetch_record
 
@@ -32,11 +34,15 @@ CLOSED_STATES = {"CLOSE"}
 @dataclass
 class Config:
     data_dir: Path = Path("data")
-    symbols: list[str] | None = None  # None = every active security
+    # Depth is one request per security, so it needs a watchlist unless explicitly told
+    # to sweep everything (all_securities) - a full sweep is several hundred requests.
+    symbols: list[str] | None = None
+    all_securities: bool = False
     depth_interval_s: float = 15.0  # minimum time between the starts of two depth sweeps
     live_interval_s: float = 5.0
     status_interval_s: float = 60.0
-    concurrency: int = 4
+    concurrency: int = 2
+    floorsheet_after_close: bool = True
     ignore_schedule: bool = False  # capture regardless of clock/market status (for testing)
     once: bool = False  # one status + live + depth pass, then exit
 
@@ -48,6 +54,8 @@ class MarketState:
     universe: dict[int, str] = field(default_factory=dict)  # security_id -> symbol
     universe_date: date | None = None
     universe_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    opened_on: date | None = None  # last trade date the market was seen open
+    floorsheet_on: date | None = None  # last trade date the floorsheet was captured
 
 
 def select_universe(securities: list[dict], symbols: list[str] | None) -> dict[int, str]:
@@ -71,6 +79,8 @@ def select_universe(securities: list[dict], symbols: list[str] | None) -> dict[i
 
 class Collector:
     def __init__(self, cfg: Config, client: NepseClient, store: RawStore | None = None) -> None:
+        if not cfg.symbols and not cfg.all_securities:
+            raise ValueError("depth needs a watchlist: pass symbols, or all_securities=True")
         self.cfg = cfg
         self.client = client
         self.store = store or RawStore(cfg.data_dir)
@@ -100,7 +110,8 @@ class Collector:
         fetch = await self.client.securities()
         self._write("securities", fetch)
         if fetch.ok and isinstance(fetch.body, list):
-            self.state.universe = select_universe(fetch.body, self.cfg.symbols)
+            symbols = None if self.cfg.all_securities else self.cfg.symbols
+            self.state.universe = select_universe(fetch.body, symbols)
             self.state.universe_date = trade_date(now_npt())
             self.state.universe_ready.set()
             log.info("universe: %d securities", len(self.state.universe))
@@ -113,14 +124,36 @@ class Collector:
             was_open = self.state.is_open
             self.state.status_text = text
             self.state.is_open = text not in CLOSED_STATES
+            if self.state.is_open:
+                self.state.opened_on = trade_date(now_npt())
             if was_open != self.state.is_open:
                 log.info("market status: %s (asOf %s)", text, fetch.body.get("asOf"))
+            if was_open and not self.state.is_open:
+                await self.after_close()
+
+    async def after_close(self) -> None:
+        today = trade_date(now_npt())
+        if (
+            not self.cfg.floorsheet_after_close
+            or self.state.opened_on != today
+            or self.state.floorsheet_on == today
+        ):
+            return
+        try:
+            result = await capture_market_floorsheet(self.client, self.store)
+        except RuntimeError as exc:
+            log.warning("floorsheet capture skipped: %s", exc)
+            return
+        if result.failed_pages == 0:
+            self.state.floorsheet_on = today
 
     async def status_loop(self) -> None:
         while not self._stop.is_set():
             now = now_npt()
             if not self.cfg.ignore_schedule and not in_window(now):
-                self.state.is_open = False
+                if self.state.is_open:
+                    self.state.is_open = False
+                    await self.after_close()
                 wake = next_window_start(now)
                 log.info("outside session window; sleeping until %s", wake.isoformat())
                 # Wake at least every 15 min so clock jumps / stop requests are noticed.

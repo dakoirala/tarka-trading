@@ -115,3 +115,32 @@ def live_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
         for item in body
         if isinstance(item, dict)
     ]
+
+
+def floorsheet_content(body: Any) -> list[dict[str, Any]]:
+    if not isinstance(body, dict):
+        return []
+    sheet = body.get("floorsheets", body)
+    content = sheet.get("content") if isinstance(sheet, dict) else None
+    return [row for row in content or [] if isinstance(row, dict)]
+
+
+def trade_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Executed trades (floorsheet), one row per contract, with buyer/seller broker ids."""
+    return [
+        {
+            "recv_ns": record["recv_ns"],
+            "business_date": row.get("businessDate"),
+            "contract_id": _int(row.get("contractId")),
+            "security_id": _int(row.get("stockId")),
+            "symbol": row.get("stockSymbol"),
+            "buyer_broker": _int(row.get("buyerMemberId")),
+            "seller_broker": _int(row.get("sellerMemberId")),
+            "quantity": _int(row.get("contractQuantity")),
+            "price": _num(row.get("contractRate")),
+            "amount": _num(row.get("contractAmount")),
+            "trade_time": row.get("tradeTime"),
+            "trade_book_id": _int(row.get("tradeBookId")),
+        }
+        for row in floorsheet_content(record.get("body"))
+    ]

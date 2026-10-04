@@ -4,7 +4,9 @@ Every HTTP exchange is appended verbatim to gzip'd JSON Lines, partitioned by st
 NEPSE trade date and hour. This is the source of truth: normalized tables are derived
 from it (see ``compact.py``) and can be rebuilt whenever the parsing logic changes.
 
-Layout: ``<root>/raw/<stream>/date=YYYY-MM-DD/<stream>-HH.jsonl.gz``. Each write appends
+Layout: ``<root>/raw/<stream>/date=YYYY-MM-DD/<stream>-HH.jsonl.gz``. The date is the NPT
+date the response arrived, unless a record carries ``partition_date`` (floorsheets use
+their business date so backfilled history lands under the right day). Each write appends
 a new gzip member, which standard gzip readers concatenate transparently.
 """
 
@@ -20,7 +22,7 @@ from typing import Any
 from .client import Fetch
 from .schedule import ns_to_npt
 
-STREAMS = ("market_status", "securities", "live_market", "depth")
+STREAMS = ("market_status", "securities", "live_market", "depth", "floorsheet")
 
 
 def fetch_record(stream: str, fetch: Fetch, **extra: Any) -> dict[str, Any]:
@@ -40,16 +42,15 @@ class RawStore:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
 
-    def path_for(self, stream: str, recv_ns: int) -> Path:
+    def path_for(self, stream: str, recv_ns: int, partition_date: str | None = None) -> Path:
         ts = ns_to_npt(recv_ns)
-        return (
-            self.root / "raw" / stream / f"date={ts.date().isoformat()}" / f"{stream}-{ts.hour:02d}.jsonl.gz"
-        )
+        day = partition_date or ts.date().isoformat()
+        return self.root / "raw" / stream / f"date={day}" / f"{stream}-{ts.hour:02d}.jsonl.gz"
 
     def write(self, records: Iterable[dict[str, Any]]) -> int:
         grouped: dict[Path, list[str]] = defaultdict(list)
         for rec in records:
-            grouped[self.path_for(rec["stream"], rec["recv_ns"])].append(
+            grouped[self.path_for(rec["stream"], rec["recv_ns"], rec.get("partition_date"))].append(
                 json.dumps(rec, separators=(",", ":"), ensure_ascii=False)
             )
         for path, lines in grouped.items():

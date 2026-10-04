@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 import pyarrow.parquet as pq
 
 from tarka_md.collector import Collector, Config, select_universe
@@ -16,7 +18,7 @@ def test_select_universe_filters():
 
 def test_once_then_compact(tmp_path, make_client, fake_nepse):
     fake_nepse.fail_depth_ids = {2790}
-    cfg = Config(data_dir=tmp_path, once=True)
+    cfg = Config(data_dir=tmp_path, symbols=["NABIL", "NICA"], once=True)
 
     async def go():
         async with make_client(max_retries=0) as client:
@@ -26,9 +28,9 @@ def test_once_then_compact(tmp_path, make_client, fake_nepse):
     day = now_npt().date().isoformat()
     stats = compact_date(tmp_path, day)
 
-    assert stats.raw_records == {"depth": 2, "live_market": 1}
-    assert stats.failed_requests == {"depth": 1, "live_market": 0}
-    assert stats.table_rows == {"l2_depth": 5, "l1_bbo": 1, "l1_trades": 2}
+    assert stats.raw_records == {"depth": 2, "live_market": 1, "floorsheet": 0}
+    assert stats.failed_requests == {"depth": 1, "live_market": 0, "floorsheet": 0}
+    assert stats.table_rows == {"l2_depth": 5, "l1_bbo": 1, "l1_trades": 2, "trades": 0}
 
     bbo = pq.read_table(tmp_path / "parquet" / "l1_bbo" / f"date={day}" / "part-0.parquet").to_pylist()
     assert bbo[0]["symbol"] == "NABIL" and bbo[0]["bid_price"] == 500.5
@@ -36,7 +38,7 @@ def test_once_then_compact(tmp_path, make_client, fake_nepse):
 
 
 def test_loop_stops_cleanly(tmp_path, make_client):
-    cfg = Config(data_dir=tmp_path, ignore_schedule=True, depth_interval_s=0.05,
+    cfg = Config(data_dir=tmp_path, all_securities=True, ignore_schedule=True, depth_interval_s=0.05,
                  live_interval_s=0.05, status_interval_s=0.05)
 
     async def go():
@@ -51,3 +53,8 @@ def test_loop_stops_cleanly(tmp_path, make_client):
     col = asyncio.run(go())
     depth = list(col.store.read("depth", now_npt().date().isoformat()))
     assert len(depth) >= 4  # several sweeps of 2 symbols
+
+
+def test_watchlist_is_required(tmp_path, make_client):
+    with pytest.raises(ValueError):
+        Collector(Config(data_dir=tmp_path), make_client())

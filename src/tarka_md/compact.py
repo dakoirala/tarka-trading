@@ -5,6 +5,8 @@ Tables (``<root>/parquet/<table>/date=YYYY-MM-DD/part-0.parquet``):
 * ``l2_depth``  one row per (snapshot, side, level) from market depth
 * ``l1_bbo``    best bid/offer per depth snapshot
 * ``l1_trades`` last trade + session stats per security per lives-market poll
+* ``trades``    floorsheet: every executed contract with buyer/seller broker,
+                de-duplicated on ``contract_id``
 
 Re-running for a date overwrites that date's files, so parsing fixes can be backfilled.
 """
@@ -12,12 +14,13 @@ Re-running for a date overwrites that date's files, so parsing fixes can be back
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date as _date
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .normalize import bbo_row, depth_rows, live_rows
+from .normalize import bbo_row, depth_rows, live_rows, trade_rows
 from .storage import RawStore
 
 # Microseconds: ample for HTTP polling and friendlier to downstream tools than ns.
@@ -72,7 +75,32 @@ SCHEMAS = {
             ("exchange_updated", pa.string()),
         ]
     ),
+    "trades": pa.schema(
+        [
+            ("recv_ts", TS),
+            ("business_date", pa.date32()),
+            ("contract_id", pa.int64()),
+            ("security_id", pa.int32()),
+            ("symbol", pa.string()),
+            ("buyer_broker", pa.int32()),
+            ("seller_broker", pa.int32()),
+            ("quantity", pa.int64()),
+            ("price", pa.float64()),
+            ("amount", pa.float64()),
+            ("trade_time", pa.string()),
+            ("trade_book_id", pa.int64()),
+        ]
+    ),
 }
+
+SORT_KEYS = {"trades": [("contract_id", "ascending")]}
+
+
+def _business_date(value) -> _date | None:
+    try:
+        return _date.fromisoformat(str(value)[:10]) if value else None
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -94,7 +122,7 @@ def compact_date(root: Path, date: str) -> CompactStats:
     raw_counts: dict[str, int] = {}
     failures: dict[str, int] = {}
 
-    for stream in ("depth", "live_market"):
+    for stream in ("depth", "live_market", "floorsheet"):
         n = bad = 0
         for rec in store.read(stream, date):
             n += 1
@@ -106,9 +134,20 @@ def compact_date(root: Path, date: str) -> CompactStats:
                 bbo = bbo_row(rec)
                 if bbo is not None:
                     tables["l1_bbo"].append(bbo)
-            else:
+            elif stream == "live_market":
                 tables["l1_trades"].extend(live_rows(rec))
+            else:
+                tables["trades"].extend(trade_rows(rec))
         raw_counts[stream], failures[stream] = n, bad
+
+    # Pages overlap when re-fetched; keep the latest observation of each contract.
+    latest: dict[int, dict] = {}
+    for row in tables["trades"]:
+        row["business_date"] = _business_date(row["business_date"])
+        key = row["contract_id"]
+        if key is not None and (key not in latest or row["recv_ns"] >= latest[key]["recv_ns"]):
+            latest[key] = row
+    tables["trades"] = list(latest.values())
 
     out_counts = {}
     for name, rows in tables.items():
@@ -117,7 +156,7 @@ def compact_date(root: Path, date: str) -> CompactStats:
             out_counts[name] = 0
             continue
         table = pa.Table.from_pylist([_rename_ts(r) for r in rows], schema=SCHEMAS[name])
-        table = table.sort_by([("recv_ts", "ascending"), ("security_id", "ascending")])
+        table = table.sort_by(SORT_KEYS.get(name, [("recv_ts", "ascending"), ("security_id", "ascending")]))
         out.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, out, compression="zstd")
         out_counts[name] = table.num_rows

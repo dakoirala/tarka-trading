@@ -2,17 +2,25 @@
 
 ## What exists
 
-* **No official public API.** NEPSE sells real-time data to brokers and vendors. The free
-  route is the JSON API behind `https://www.nepalstock.com`. It is undocumented and
-  changes without notice, so treat everything below as reverse-engineered and verify it
-  with `tarka-md probe` on the deploy host.
+* **Licensed data exists.** In December 2020 NEPSE launched a paid data API with
+  real-time (reported as under 30 s delay) and historical data. Fees differ for
+  individuals, education/research and redistributors. Licensed vendors (npstocks,
+  SmartWealthPro's MDP, ...) resell it. Whether it includes market depth or order-level
+  history is unconfirmed; see `docs/outreach/`.
+* **No trading API for brokers.** Brokers trade through NEPSE's web TMS. SEBON has been
+  working on an API policy that would allow broker-chosen TMS / API access, but nothing
+  sanctioned for automated order entry exists yet.
+* **The free route** is the JSON API behind `https://www.nepalstock.com`. It is
+  undocumented and changes without notice, so treat everything below as
+  reverse-engineered and verify it with `tarka-md probe` on the deploy host.
 * **Market depth is top-of-book aggregated by price, not full order-by-order (L3).** Each side
   lists price levels with total quantity and order count. NEPSE added market depth to
   the site in 2021; the website shows 5 levels per side. We store whatever comes back.
 * There is **no streaming/websocket feed**, only polling. Updates between two polls are
   never seen. Lower intervals and a smaller watchlist give finer resolution.
 
-Sources used to work this out: the community clients
+Sources: [NEPSE data API launch (ShareSansar, Dec 2020)](https://www.sharesansar.com/newsdetail/another-milestone-nepse-finally-brings-data-api-after-a-long-wait-real-time-data-with-only-30-second-delay-2020-12-27),
+[SEBON API policy (Merolagani)](https://eng.merolagani.com/NewsDetail.aspx?newsID=62089), and the community clients
 [NepseUnofficialApi](https://github.com/basic-bgnr/NepseUnofficialApi) (commit `180a550`,
 June 2026), [`nepse-scraper`](https://pypi.org/project/nepse-scraper/) and
 [`nepsense`](https://pypi.org/project/nepsense/), which agree on the endpoints and depth
@@ -37,9 +45,16 @@ fields below.
 3. Send `Authorization: Salter <token>`. Tokens go stale in under a minute; the client
    refreshes every 40 s and on any 401.
 
-Some endpoints (floorsheet, today-price, graphs) are `POST` with an `{"id": n}` body
-derived from the date, the salts and the `market-open` id. None of the L1/L2 endpoints
-need it.
+Some endpoints (floorsheet, today-price, graphs) are `POST` with an `{"id": n}` body:
+
+```
+e   = DUMMY_DATA[market_open.id] + market_open.id + 2 * day_of_month
+i   = 1 if e % 10 < 4 else 3          # floorsheet variant
+id  = e + salt[i+1] * day_of_month - salt[i]   # salt1..salt5, 1-based
+```
+
+`DUMMY_DATA` is a 100-entry table from the site's JS (read from the `nepse` package).
+We use the Nepal-time day of month. Implemented in `auth.floorsheet_payload_id`.
 
 ## Endpoints used
 
@@ -48,6 +63,8 @@ need it.
 | `GET /api/nots/nepse-data/market-open` | `{"isOpen", "asOf", "id"}` |
 | `GET /api/nots/security?nonDelisted=true` | `[{"id", "symbol", "securityName", "activeStatus", ...}]`; refreshed once per trade date |
 | `GET /api/nots/lives-market` | list, one item per security traded today: `lastTradedPrice`, `lastTradedVolume`, `openPrice`, `highPrice`, `lowPrice`, `previousClose`, `averageTradedPrice`, `totalTradeQuantity`, `totalTradeValue`, `percentageChange`, `lastUpdatedDateTime` |
+| `POST /api/nots/nepse-data/floorsheet?size=500&sort=contractId,desc&page=N` | latest business day, all trades: `{"floorsheets": {"content": [...], "totalPages"}}`; rows have `contractId`, `stockId`, `stockSymbol`, `buyerMemberId`, `sellerMemberId`, `contractQuantity`, `contractRate`, `contractAmount`, `businessDate`, `tradeTime` |
+| `POST /api/nots/security/floorsheet/{securityId}?businessDate=YYYY-MM-DD&...` | same shape, one security, any date NEPSE still serves (range unknown) |
 | `GET /api/nots/nepse-data/marketdepth/{securityId}/` | `{"totalBuyQty", "totalSellQty", "marketDepth": {"buyMarketDepthList": [...], "sellMarketDepthList": [...]}}`; each level has `orderBookOrderPrice`, `quantity`, `orderCount` |
 
 The depth fields are confirmed by two independent clients. The `lives-market` field
@@ -74,16 +91,21 @@ stream / NPT trade date / hour. Reasons:
 | `l2_depth` | snapshot × side (`B`/`S`) × level (1 = best) |
 | `l1_bbo` | snapshot: best bid/ask price, qty, orders, total buy/sell qty |
 | `l1_trades` | lives-market poll × security |
+| `trades` | floorsheet contract (deduped on `contract_id`), partitioned by business date |
 
 Snapshots are stored even when unchanged. Dedupe or diff in analysis if needed.
 
-## Capacity
+## Load and politeness
 
-A full sweep is one depth request per active security. That can be several hundred
-requests, and one sweep can easily take longer than `--depth-interval`. The loop then
-runs sweeps back to back. Concurrency defaults to 4 to stay polite to a fragile server.
-If finer resolution matters for particular names, run a second collector with a
-`--symbols` watchlist and a short interval.
+NEPSE's 2020 data API announcement explicitly cited scrapers slowing the site down. All
+requests go through one limiter (`--rate`, default 2/s). Any 429/5xx/connection error
+pauses every request with exponential backoff (2 s doubling to 120 s, or `Retry-After`).
+The User-Agent names the tool and `TARKA_MD_CONTACT`.
+
+Budget at 2 req/s: the live feed takes 0.2 req/s (every 5 s), leaving about 1.8 req/s
+for depth. A 30-symbol watchlist then refreshes about every 17 s. `--all-securities`
+(several hundred names) takes minutes per sweep. Raising `--rate` is a deliberate choice,
+not a default.
 
 ## Known risks / next steps
 
@@ -93,5 +115,8 @@ If finer resolution matters for particular names, run a second collector with a
 * nepalstock.com is slow under load and sometimes unreachable from outside Nepal. Host
   the collector somewhere `probe` works reliably.
 * Gap monitoring and alerting are not built yet (e.g. failed-request rate per sweep, sweep duration).
-* The floorsheet (every trade, end of day) would add trade-level L1. It needs the POST
-  payload id logic.
+* The after-close floorsheet is tried once per day. If it fails, run
+  `tarka-md floorsheet` manually before the next session.
+* How far back the per-security floorsheet serves history is untested. Check it with
+  `tarka-md floorsheet --symbols NABIL --date <old date>` before planning a backfill.
+  A full backfill is securities × days × pages of requests, so do it slowly or buy it.
