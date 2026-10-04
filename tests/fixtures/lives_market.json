@@ -1,0 +1,8 @@
+[
+  {"securityId": 131, "symbol": "NABIL", "securityName": "Nabil Bank Limited",
+   "openPrice": 497.0, "highPrice": 503.0, "lowPrice": 496.0, "lastTradedPrice": 500.5,
+   "lastTradedVolume": 50, "previousClose": 495.0, "averageTradedPrice": 499.8,
+   "totalTradeQuantity": 41200, "totalTradeValue": 20591760.0, "percentageChange": 1.11,
+   "lastUpdatedDateTime": "2026-10-04T13:05:12.345"},
+  {"securityId": 2790, "symbol": "NICA", "lastTradedPrice": "412", "totalTradeQuantity": null}
+]

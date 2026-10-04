@@ -1,0 +1,17 @@
+{
+  "securityId": 131,
+  "symbol": "NABIL",
+  "totalBuyQty": 5210,
+  "totalSellQty": 3870,
+  "marketDepth": {
+    "buyMarketDepthList": [
+      {"orderBookOrderPrice": 498.0, "quantity": 1200, "orderCount": 4, "isBuy": 1},
+      {"orderBookOrderPrice": 500.5, "quantity": 310, "orderCount": 2, "isBuy": 1},
+      {"orderBookOrderPrice": 499.0, "quantity": 700, "orderCount": 3, "isBuy": 1}
+    ],
+    "sellMarketDepthList": [
+      {"orderBookOrderPrice": 503.0, "quantity": 900, "orderCount": 5, "isBuy": 2},
+      {"orderBookOrderPrice": 501.0, "quantity": 150, "orderCount": 1, "isBuy": 2}
+    ]
+  }
+}

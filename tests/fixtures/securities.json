@@ -1,0 +1,5 @@
+[
+  {"id": 131, "symbol": "NABIL", "securityName": "Nabil Bank Limited", "activeStatus": "A"},
+  {"id": 2790, "symbol": "NICA", "securityName": "NIC Asia Bank Ltd.", "activeStatus": "A"},
+  {"id": 999, "symbol": "OLDCO", "securityName": "Suspended Co", "activeStatus": "S"}
+]
